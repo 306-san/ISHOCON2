@@ -2,11 +2,20 @@ require 'sinatra/base'
 require 'mysql2'
 require 'mysql2-cs-bind'
 require 'erubis'
+require 'ddtrace'                         # ここ追記
+require 'ddtrace/contrib/sinatra/tracer'  # ここ追記
 
 module Ishocon2
   class AuthenticationError < StandardError; end
   class PermissionDenied < StandardError; end
 end
+
+
+Datadog.configure do |c|
+  c.use :sinatra,analytics_enabled: true
+  c.use :mysql2, analytics_enabled: true
+end
+
 
 class Ishocon2::WebApp < Sinatra::Base
   session_secret = ENV['ISHOCON2_SESSION_SECRET'] || 'showwin_happy'
@@ -63,7 +72,7 @@ SELECT keyword
 FROM votes
 WHERE candidate_id IN (?)
 GROUP BY keyword
-ORDER BY COUNT(*) DESC
+ORDER BY COUNT(id) DESC
 LIMIT 10
 SQL
       db.xquery(query, candidate_ids).map { |a| a[:keyword] }
@@ -99,9 +108,9 @@ SQL
   end
 
   get '/candidates/:id' do
-    candidate = db.xquery('SELECT * FROM candidates WHERE id = ?', params[:id]).first
+    candidate = db.xquery('SELECT name, political_party, sex FROM candidates WHERE id = ?', params[:id]).first
     return redirect '/' if candidate.nil?
-    votes = db.xquery('SELECT COUNT(*) AS count FROM votes WHERE candidate_id = ?', params[:id]).first[:count]
+    votes = db.xquery('SELECT COUNT(id) AS count FROM votes WHERE candidate_id = ?', params[:id]).first[:count]
     keywords = voice_of_supporter([params[:id]])
     erb :candidate, locals: { candidate: candidate,
                               votes: votes,
@@ -113,7 +122,7 @@ SQL
     election_results.each do |r|
       votes += r[:count] || 0 if r[:political_party] == params[:name]
     end
-    candidates = db.xquery('SELECT * FROM candidates WHERE political_party = ?', params[:name])
+    candidates = db.xquery('SELECT id,name FROM candidates WHERE political_party = ?', params[:name])
     candidate_ids = candidates.map { |c| c[:id] }
     keywords = voice_of_supporter(candidate_ids)
     erb :political_party, locals: { political_party: params[:name],
@@ -123,20 +132,20 @@ SQL
   end
 
   get '/vote' do
-    candidates = db.query('SELECT * FROM candidates')
+    candidates = db.query('SELECT name FROM candidates')
     erb :vote, locals: { candidates: candidates, message: '' }
   end
 
   post '/vote' do
-    user = db.xquery('SELECT * FROM users WHERE name = ? AND address = ? AND mynumber = ?',
+    user = db.xquery('SELECT id, votes FROM users WHERE name = ? AND address = ? AND mynumber = ?',
                      params[:name],
                      params[:address],
                      params[:mynumber]).first
-    candidate = db.xquery('SELECT * FROM candidates WHERE name = ?', params[:candidate]).first
+    candidate = db.xquery('SELECT id FROM candidates WHERE name = ?', params[:candidate]).first
     voted_count =
-      user.nil? ? 0 : db.xquery('SELECT COUNT(*) AS count FROM votes WHERE user_id = ?', user[:id]).first[:count]
+      user.nil? ? 0 : db.xquery('SELECT COUNT(id) AS count FROM votes WHERE user_id = ?', user[:id]).first[:count]
 
-    candidates = db.query('SELECT * FROM candidates')
+    candidates = db.query('SELECT name FROM candidates')
     if user.nil?
       return erb :vote, locals: { candidates: candidates, message: '個人情報に誤りがあります' }
     elsif user[:votes] < (params[:vote_count].to_i + voted_count)
